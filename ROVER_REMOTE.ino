@@ -1,7 +1,6 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <ESP32Servo.h>
 
 // I2C PINS
 #define SDA_PIN 5
@@ -20,10 +19,10 @@ bool sensorOnline = false;
 #include <WiFiUdp.h>
 
 const char* ssid = "mochan";
-const char* password = ""; // No password
+const char* password = "";
 WiFiUDP udp;
 const int UDP_PORT = 5005;
-IPAddress roverIP(192, 168, 4, 2); // Expected rover IP on AP
+IPAddress roverIP(192, 168, 4, 1); // Broadcast to AP IP
 
 // Motor Command States
 enum MotorCommand {
@@ -42,6 +41,8 @@ volatile MotorCommand lastCommand = CMD_IDLE;
 unsigned long lastCommandTime = 0;
 String connectionStatus = "Connecting...";
 unsigned long lastUDPSend = 0;
+bool wifiConnected = false;
+unsigned long lastWifiCheck = 0;
 
 // Safely probe and wake up the BMI160
 void checkAndWakeBMI160() {
@@ -83,7 +84,7 @@ int16_t readBMI160_X() {
 // Send motor command via UDP to rover
 void sendMotorCommand(MotorCommand cmd) {
   if (cmd == lastCommand) return; // Don't repeat same command
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (!wifiConnected) return;
 
   lastCommand = cmd;
   lastCommandTime = millis();
@@ -147,7 +148,7 @@ void setup() {
   WiFi.begin(ssid, password);
   
   int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     delay(500);
     Serial.print(".");
     attempts++;
@@ -158,9 +159,11 @@ void setup() {
     Serial.print("Local IP: ");
     Serial.println(WiFi.localIP());
     connectionStatus = "WiFi OK";
+    wifiConnected = true;
   } else {
-    Serial.println("\n[✗] WiFi Failed");
+    Serial.println("\n[✗] WiFi Failed - Check SSID and Power");
     connectionStatus = "WiFi FAIL";
+    wifiConnected = false;
   }
 
   // Initialize UDP
@@ -169,6 +172,24 @@ void setup() {
 }
 
 void loop() {
+  // Check WiFi every 2 seconds (to avoid constant polling)
+  if (millis() - lastWifiCheck > 2000) {
+    lastWifiCheck = millis();
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!wifiConnected) {
+        wifiConnected = true;
+        connectionStatus = "WiFi OK";
+        Serial.println("[✔] WiFi Reconnected!");
+      }
+    } else {
+      if (wifiConnected) {
+        wifiConnected = false;
+        connectionStatus = "WiFi LOST";
+        Serial.println("[✗] WiFi Lost");
+      }
+    }
+  }
+
   display.clearDisplay();
 
   // --- READ ACCELEROMETER FOR TILT CONTROL ---
@@ -192,20 +213,13 @@ void loop() {
   } else if (tiltFactor > 0.15) {
     currentCommand = CMD_FORWARD;
   } else if (tiltFactor < -0.15) {
-    currentCommand = CMD_FORWARD; // Both forward
+    currentCommand = CMD_FORWARD;
   } else {
     currentCommand = CMD_STOP;
   }
 
   // Send command to rover
   sendMotorCommand(currentCommand);
-
-  // Update connection status
-  if (WiFi.status() == WL_CONNECTED) {
-    connectionStatus = "WiFi OK";
-  } else {
-    connectionStatus = "No WiFi";
-  }
 
   // --- DRAW STATUS DISPLAY ---
   display.setTextSize(1);
@@ -223,7 +237,11 @@ void loop() {
   // Local IP
   display.setCursor(0, 18);
   display.print("IP: ");
-  display.println(WiFi.localIP());
+  if (wifiConnected) {
+    display.println(WiFi.localIP());
+  } else {
+    display.println("---");
+  }
 
   // Current Command
   display.setCursor(0, 26);
