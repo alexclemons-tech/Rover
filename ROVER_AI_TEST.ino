@@ -26,7 +26,7 @@ VL53L0X laserSensor;
 
 /* ================= WiFi & UDP ================= */
 const char* ssid = "mochan";
-const char* password = ""; // No password
+const char* password = "";
 WiFiUDP udp;
 const int UDP_PORT = 5005;
 
@@ -34,7 +34,8 @@ const int UDP_PORT = 5005;
 volatile bool manualActive = false;
 int lastDistance = 9999;
 bool obstacleDetected = false;
-String connectionStatus = "Initializing...";
+String lastCommand = "IDLE";
+unsigned long lastCommandTime = 0;
 
 /* ================= MOTOR CONTROL ================= */
 void motorControl(byte c) {
@@ -111,15 +112,13 @@ void setup() {
   roboEyes.setMood(DEFAULT);
 
   // Setup WiFi AP
-  Serial.println("[*] Starting WiFi AP: mochan");
+  Serial.println("[*] Starting WiFi AP: mochan (open network)");
   WiFi.mode(WIFI_AP);
   WiFi.softAP(ssid, password);
   
   IPAddress IP = WiFi.softAPIP();
   Serial.print("[✔] WiFi AP IP: ");
   Serial.println(IP);
-  
-  connectionStatus = "AP Active";
 
   // Initialize UDP listener
   udp.begin(UDP_PORT);
@@ -127,7 +126,7 @@ void setup() {
   Serial.println(UDP_PORT);
 
   digitalWrite(STBY, HIGH);
-  Serial.println("=== BOOT COMPLETED: Rover Is Live ===");
+  Serial.println("=== BOOT COMPLETED: Rover Ready ===");
 }
 
 /* ================= LOOP ================= */
@@ -147,6 +146,8 @@ void loop() {
     
     Serial.print("[UDP CMD] ");
     Serial.println(command);
+    lastCommand = command;
+    lastCommandTime = millis();
     
     if (command == "forward") {
       manualActive = true;
@@ -216,7 +217,7 @@ void loop() {
     }
   }
 
-  // 3. DISPLAY STATUS
+  // 3. DISPLAY STATUS (Update every 500ms)
   static unsigned long lastDisplayUpdate = 0;
   if (millis() - lastDisplayUpdate > 500) {
     lastDisplayUpdate = millis();
@@ -229,16 +230,15 @@ void loop() {
     display.println("=== ROVER STATUS ===");
     
     display.setCursor(0, 10);
-    display.print("WiFi: ");
-    display.println(connectionStatus);
+    display.print("WiFi: ACTIVE");
     
     display.setCursor(0, 18);
     display.print("IP: ");
     display.println(WiFi.softAPIP());
     
     display.setCursor(0, 26);
-    display.print("Status: ");
-    display.println(manualActive ? "ACTIVE" : "IDLE");
+    display.print("Last Cmd: ");
+    display.println(lastCommand);
     
     display.setCursor(0, 34);
     display.print("Distance: ");
@@ -252,6 +252,10 @@ void loop() {
     display.setCursor(0, 42);
     display.print("Obstacle: ");
     display.println(obstacleDetected ? "YES" : "NO");
+    
+    display.setCursor(0, 50);
+    display.print("Status: ");
+    display.println(manualActive ? "ACTIVE" : "IDLE");
     
     display.display();
   }
