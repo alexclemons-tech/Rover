@@ -2,6 +2,8 @@
 #include <Adafruit_SSD1306.h>
 #include <FluxGarage_RoboEyes.h>
 #include <VL53L0X.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
 
 /* ================= OLED ================= */
 #define SCREEN_WIDTH 128
@@ -22,10 +24,17 @@ VL53L0X laserSensor;
 #define RB   3
 #define STBY 10
 
+/* ================= WiFi & UDP ================= */
+const char* ssid = "mochan";
+const char* password = ""; // No password
+WiFiUDP udp;
+const int UDP_PORT = 5005;
+
 /* ================= STATE ================= */
 volatile bool manualActive = false;
 int lastDistance = 9999;
 bool obstacleDetected = false;
+String connectionStatus = "Initializing...";
 
 /* ================= MOTOR CONTROL ================= */
 void motorControl(byte c) {
@@ -79,7 +88,7 @@ void setup() {
   while (!Serial && (millis() - startWait < 3000)); 
   
   Serial.println("\n=================================");
-  Serial.println("--- MOCHAN ROVER REMOTE CONTROL ---");
+  Serial.println("--- MOCHAN ROVER WIRELESS CONTROL ---");
   Serial.println("=================================");
   
   pinMode(STBY,OUTPUT); digitalWrite(STBY,LOW);
@@ -95,14 +104,27 @@ void setup() {
     Serial.println("[✔] Laser Sensor Online.");
   }
 
-  // Initialize Serial1 for remote control (115200 baud)
-  Serial1.begin(115200, SERIAL_8N1, 7, 4); 
-  Serial.println("[✔] Remote Control Port Initialized on Pins 7 & 4 (Speed: 115,200).");
-
+  // Initialize RoboEyes
   roboEyes.begin(SCREEN_WIDTH, SCREEN_HEIGHT, 100);
   roboEyes.setAutoblinker(ON, 3, 2);
   roboEyes.setIdleMode(ON, 2, 2);
   roboEyes.setMood(DEFAULT);
+
+  // Setup WiFi AP
+  Serial.println("[*] Starting WiFi AP: mochan");
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+  
+  IPAddress IP = WiFi.softAPIP();
+  Serial.print("[✔] WiFi AP IP: ");
+  Serial.println(IP);
+  
+  connectionStatus = "AP Active";
+
+  // Initialize UDP listener
+  udp.begin(UDP_PORT);
+  Serial.print("[✔] UDP Listening on port ");
+  Serial.println(UDP_PORT);
 
   digitalWrite(STBY, HIGH);
   Serial.println("=== BOOT COMPLETED: Rover Is Live ===");
@@ -112,52 +134,49 @@ void setup() {
 void loop() {
   roboEyes.update();
 
-  // 1. REMOTE CONTROL COMMAND PARSER
-  static String commandBuffer = "";
-  
-  while (Serial1.available() > 0) {
-    char c = Serial1.read();
+  // 1. REMOTE CONTROL UDP COMMAND PARSER
+  int packetSize = udp.parsePacket();
+  if (packetSize) {
+    String command = "";
+    while (udp.available()) {
+      command += (char)udp.read();
+    }
     
-    if (c == '\n' || c == '\r') {
-      commandBuffer.trim();
+    command.trim();
+    command.toLowerCase();
+    
+    Serial.print("[UDP CMD] ");
+    Serial.println(command);
+    
+    if (command == "forward") {
+      manualActive = true;
+      roboEyes.setMood(HAPPY);
+      motorControl(1);
+      Serial.println("[EXEC] FORWARD");
       
-      if (commandBuffer.length() > 0) {
-        // Parse and execute command
-        if (commandBuffer.indexOf("forward") >= 0) {
-          manualActive = true;
-          roboEyes.setMood(HAPPY);
-          motorControl(1);
-          Serial.println("[CMD] FORWARD");
-          
-        } else if (commandBuffer.indexOf("reverse") >= 0) {
-          manualActive = true;
-          roboEyes.setMood(DEFAULT);
-          motorControl(2);
-          Serial.println("[CMD] REVERSE");
-          
-        } else if (commandBuffer.indexOf("left") >= 0) {
-          manualActive = true;
-          roboEyes.setMood(DEFAULT);
-          motorControl(3);
-          Serial.println("[CMD] LEFT");
-          
-        } else if (commandBuffer.indexOf("right") >= 0) {
-          manualActive = true;
-          roboEyes.setMood(DEFAULT);
-          motorControl(4);
-          Serial.println("[CMD] RIGHT");
-          
-        } else if (commandBuffer.indexOf("stop") >= 0) {
-          manualActive = false;
-          roboEyes.setMood(DEFAULT);
-          motorControl(0);
-          Serial.println("[CMD] STOP");
-        }
-        
-        commandBuffer = "";
-      }
-    } else if (c > 31 && c < 127) { // Printable ASCII
-      commandBuffer += c;
+    } else if (command == "reverse") {
+      manualActive = true;
+      roboEyes.setMood(DEFAULT);
+      motorControl(2);
+      Serial.println("[EXEC] REVERSE");
+      
+    } else if (command == "left") {
+      manualActive = true;
+      roboEyes.setMood(DEFAULT);
+      motorControl(3);
+      Serial.println("[EXEC] LEFT");
+      
+    } else if (command == "right") {
+      manualActive = true;
+      roboEyes.setMood(DEFAULT);
+      motorControl(4);
+      Serial.println("[EXEC] RIGHT");
+      
+    } else if (command == "stop") {
+      manualActive = false;
+      roboEyes.setMood(DEFAULT);
+      motorControl(0);
+      Serial.println("[EXEC] STOP");
     }
   }
 
@@ -179,11 +198,6 @@ void loop() {
           Serial.print(distanceMM);
           Serial.println(" mm");
           
-          // Send feedback to remote
-          Serial1.print("Obstacle: ");
-          Serial1.print(distanceMM);
-          Serial1.println("mm");
-          
           obstacleDetected = true;
           
           // Emergency stop and evade
@@ -200,6 +214,46 @@ void loop() {
         }
       }
     }
+  }
+
+  // 3. DISPLAY STATUS
+  static unsigned long lastDisplayUpdate = 0;
+  if (millis() - lastDisplayUpdate > 500) {
+    lastDisplayUpdate = millis();
+    
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(SSD1306_WHITE);
+    
+    display.setCursor(0, 0);
+    display.println("=== ROVER STATUS ===");
+    
+    display.setCursor(0, 10);
+    display.print("WiFi: ");
+    display.println(connectionStatus);
+    
+    display.setCursor(0, 18);
+    display.print("IP: ");
+    display.println(WiFi.softAPIP());
+    
+    display.setCursor(0, 26);
+    display.print("Status: ");
+    display.println(manualActive ? "ACTIVE" : "IDLE");
+    
+    display.setCursor(0, 34);
+    display.print("Distance: ");
+    if (lastDistance < 9999) {
+      display.print(lastDistance);
+      display.println("mm");
+    } else {
+      display.println("---");
+    }
+    
+    display.setCursor(0, 42);
+    display.print("Obstacle: ");
+    display.println(obstacleDetected ? "YES" : "NO");
+    
+    display.display();
   }
 
   delay(16); // ~60 FPS update
