@@ -1,11 +1,11 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include <ESP32Servo.h>
 
 // I2C PINS
 #define SDA_PIN 5
 #define SCL_PIN 6
-#define TOUCH_PIN 2
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -15,23 +15,33 @@ Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 const int BMI160_ADDR = 0x68;
 bool sensorOnline = false;
 
+// WiFi & UDP
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+const char* ssid = "mochan";
+const char* password = ""; // No password
+WiFiUDP udp;
+const int UDP_PORT = 5005;
+IPAddress roverIP(192, 168, 4, 2); // Expected rover IP on AP
+
 // Motor Command States
 enum MotorCommand {
   CMD_STOP = 0,
   CMD_FORWARD = 1,
   CMD_REVERSE = 2,
   CMD_LEFT = 3,
-  CMD_RIGHT = 4
+  CMD_RIGHT = 4,
+  CMD_IDLE = 5
 };
 
-volatile MotorCommand currentCommand = CMD_STOP;
-volatile MotorCommand lastCommand = CMD_STOP;
+volatile MotorCommand currentCommand = CMD_IDLE;
+volatile MotorCommand lastCommand = CMD_IDLE;
 
-// Status variables for display
-int laserDistance = 9999;
-String aiResponse = "";
+// Status variables
 unsigned long lastCommandTime = 0;
-unsigned long commandDuration = 0;
+String connectionStatus = "Connecting...";
+unsigned long lastUDPSend = 0;
 
 // Safely probe and wake up the BMI160
 void checkAndWakeBMI160() {
@@ -70,9 +80,10 @@ int16_t readBMI160_X() {
   return 0;
 }
 
-// Send motor command via Serial1 to rover
+// Send motor command via UDP to rover
 void sendMotorCommand(MotorCommand cmd) {
   if (cmd == lastCommand) return; // Don't repeat same command
+  if (WiFi.status() != WL_CONNECTED) return;
 
   lastCommand = cmd;
   lastCommandTime = millis();
@@ -94,11 +105,17 @@ void sendMotorCommand(MotorCommand cmd) {
     case CMD_RIGHT:
       cmdStr = "right";
       break;
+    case CMD_IDLE:
+      return; // Don't send idle
   }
 
-  Serial1.println(cmdStr);
-  Serial.print("[REMOTE CMD] ");
+  udp.beginPacket(roverIP, UDP_PORT);
+  udp.print(cmdStr);
+  udp.endPacket();
+
+  Serial.print("[REMOTE UDP] ");
   Serial.println(cmdStr);
+  lastUDPSend = millis();
 }
 
 void setup() {
@@ -116,15 +133,39 @@ void setup() {
   }
 
   display.setRotation(2);
-  pinMode(TOUCH_PIN, INPUT);
 
   // Initialize accelerometer
   checkAndWakeBMI160();
 
-  // Initialize Serial1 for rover communication (115200 baud)
-  Serial1.begin(115200, SERIAL_8N1, 7, 4);
+  Serial.println("\n=== ROVER WIRELESS REMOTE CONTROL ===");
+  
+  // Connect to WiFi AP
+  Serial.print("Connecting to WiFi: ");
+  Serial.println(ssid);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\n[✔] WiFi Connected!");
+    Serial.print("Local IP: ");
+    Serial.println(WiFi.localIP());
+    connectionStatus = "WiFi OK";
+  } else {
+    Serial.println("\n[✗] WiFi Failed");
+    connectionStatus = "WiFi FAIL";
+  }
 
-  Serial.println("=== ROVER REMOTE CONTROL INITIALIZED ===");
+  // Initialize UDP
+  udp.begin(UDP_PORT);
+  Serial.println("[✔] UDP Initialized on port 5005");
 }
 
 void loop() {
@@ -144,12 +185,14 @@ void loop() {
   }
 
   // --- DETERMINE MOTOR COMMAND BASED ON TILT ---
-  if (tiltFactor > 0.3) {
+  if (tiltFactor > 0.4) {
     currentCommand = CMD_RIGHT;
-  } else if (tiltFactor < -0.3) {
+  } else if (tiltFactor < -0.4) {
     currentCommand = CMD_LEFT;
-  } else if (abs(tiltFactor) > 0.1) {
+  } else if (tiltFactor > 0.15) {
     currentCommand = CMD_FORWARD;
+  } else if (tiltFactor < -0.15) {
+    currentCommand = CMD_FORWARD; // Both forward
   } else {
     currentCommand = CMD_STOP;
   }
@@ -157,28 +200,11 @@ void loop() {
   // Send command to rover
   sendMotorCommand(currentCommand);
 
-  // --- CHECK FOR ROVER FEEDBACK ---
-  static String roverBuffer = "";
-  while (Serial1.available() > 0) {
-    char c = Serial1.read();
-    if (c == '\n' || c == '\r') {
-      if (roverBuffer.length() > 0) {
-        // Parse rover feedback
-        if (roverBuffer.indexOf("Obstacle") >= 0) {
-          // Extract distance value
-          int idx = roverBuffer.indexOf(":");
-          if (idx >= 0) {
-            laserDistance = roverBuffer.substring(idx + 1).toInt();
-          }
-        }
-        aiResponse = roverBuffer;
-        Serial.print("[ROVER RESPONSE] ");
-        Serial.println(roverBuffer);
-        roverBuffer = "";
-      }
-    } else if (c > 31 && c < 127) { // Printable ASCII
-      roverBuffer += c;
-    }
+  // Update connection status
+  if (WiFi.status() == WL_CONNECTED) {
+    connectionStatus = "WiFi OK";
+  } else {
+    connectionStatus = "No WiFi";
   }
 
   // --- DRAW STATUS DISPLAY ---
@@ -191,12 +217,17 @@ void loop() {
 
   // Connection Status
   display.setCursor(0, 10);
-  display.print("Accel: ");
-  display.println(sensorOnline ? "OK" : "FAIL");
+  display.print("WiFi: ");
+  display.println(connectionStatus);
+
+  // Local IP
+  display.setCursor(0, 18);
+  display.print("IP: ");
+  display.println(WiFi.localIP());
 
   // Current Command
-  display.setCursor(0, 18);
-  display.print("Command: ");
+  display.setCursor(0, 26);
+  display.print("Cmd: ");
   switch (currentCommand) {
     case CMD_STOP:
       display.println("STOP");
@@ -213,38 +244,31 @@ void loop() {
     case CMD_RIGHT:
       display.println("RIGHT");
       break;
+    case CMD_IDLE:
+      display.println("IDLE");
+      break;
   }
 
   // Tilt indicator
-  display.setCursor(0, 26);
+  display.setCursor(0, 34);
   display.print("Tilt: ");
   display.println(tiltFactor, 2);
 
-  // Laser Distance
-  display.setCursor(0, 34);
-  display.print("Distance: ");
-  if (laserDistance < 9999) {
-    display.print(laserDistance);
-    display.println("mm");
+  // Accelerometer status
+  display.setCursor(0, 42);
+  display.print("Accel: ");
+  display.println(sensorOnline ? "OK" : "FAIL");
+
+  // Last send time
+  display.setCursor(0, 50);
+  display.print("Last: ");
+  unsigned long timeSinceLastSend = millis() - lastUDPSend;
+  if (timeSinceLastSend < 60000) {
+    display.print(timeSinceLastSend / 1000);
+    display.println("s ago");
   } else {
     display.println("---");
   }
-
-  // Last response (scrolling/truncated)
-  display.setCursor(0, 42);
-  display.print("Status: ");
-  String statusMsg = aiResponse;
-  if (statusMsg.length() > 18) {
-    statusMsg = statusMsg.substring(0, 18);
-  }
-  display.println(statusMsg);
-
-  // Command duration
-  commandDuration = millis() - lastCommandTime;
-  display.setCursor(0, 54);
-  display.print("Uptime: ");
-  display.print(millis() / 1000);
-  display.println("s");
 
   display.display();
   delay(50); // 20 FPS update rate
